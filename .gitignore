@@ -1,0 +1,8 @@
+# Build output; build.ps1 recreates it.
+bin/
+
+# Visual Studio and Windows clutter.
+.vs/
+*.user
+Thumbs.db
+desktop.ini
