@@ -4,7 +4,9 @@ A small Windows app that shows who has Office documents locked. Drop documents o
 Office lock files (`~$...`) beside each document to show the user name and Windows account that opened it.
 
 The window is drawn in the Windows XP Luna (blue) style. `XpForm` paints the title bar and frame itself while
-Windows still handles move, resize, snap and maximize; the `Xp*` controls and `XpTheme` cover the rest.
+Windows still handles move, resize, snap and maximize; the `Xp*` controls and `XpTheme` cover the rest. The caption
+buttons are the original XP bitmaps as traced by [XP.css](https://github.com/botoxparty/XP.css) (MIT license);
+`assets\Convert-XpCaptionButtons.ps1` regenerates `assets\caption\*.png` from its stylesheet.
 
 ## Use
 

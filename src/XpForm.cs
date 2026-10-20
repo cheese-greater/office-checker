@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -20,22 +23,30 @@ namespace OfficeLockChecker
         // The real window keeps these so Windows still offers snap, maximize, minimize and their animations.
         private const int NativeFrameStyles = NativeMethods.WS_CAPTION | NativeMethods.WS_THICKFRAME;
 
+        private const int CaptionButtonSize = 21;
+
         private static readonly CaptionButton[] CaptionButtons = { CaptionButton.Minimize, CaptionButton.Maximize, CaptionButton.Close };
 
-        // Title bar gradient stops taken from XP.css; the inactive colors are the same bands washed out.
-        private static readonly float[] TitleStops = { 0F, 0.08F, 0.40F, 0.88F, 0.93F, 0.95F, 0.96F, 1F };
+        // Title bar shading matched to a real XP window: dark top edge, glossy band, flat body, lighter band, dark bottom line.
+        private static readonly float[] TitleStops =
+        {
+            0F, 0.04F, 0.06F, 0.08F, 0.10F, 0.14F, 0.20F, 0.24F, 0.56F, 0.66F, 0.76F, 0.88F, 0.92F, 0.95F, 1F
+        };
         private static readonly Color[] ActiveTitleColors =
         {
-            XpTheme.Hex("#0997ff"), XpTheme.Hex("#0053ee"), XpTheme.Hex("#0050ee"), XpTheme.Hex("#0066ff"),
-            XpTheme.Hex("#0066ff"), XpTheme.Hex("#005bff"), XpTheme.Hex("#003dd7"), XpTheme.Hex("#003dd7")
+            XpTheme.Hex("#0058ee"), XpTheme.Hex("#3593ff"), XpTheme.Hex("#288eff"), XpTheme.Hex("#127dff"), XpTheme.Hex("#036ffc"),
+            XpTheme.Hex("#0262ee"), XpTheme.Hex("#0057e5"), XpTheme.Hex("#0054e3"), XpTheme.Hex("#0055eb"), XpTheme.Hex("#005bf5"),
+            XpTheme.Hex("#026afe"), XpTheme.Hex("#0066fb"), XpTheme.Hex("#0057e5"), XpTheme.Hex("#0040ab"), XpTheme.Hex("#003092")
         };
-        private static readonly Color[] InactiveTitleColors =
-        {
-            XpTheme.Hex("#b6cdf7"), XpTheme.Hex("#8da9ea"), XpTheme.Hex("#7e9de5"), XpTheme.Hex("#94b4f2"),
-            XpTheme.Hex("#94b4f2"), XpTheme.Hex("#87a6ee"), XpTheme.Hex("#6f8cd8"), XpTheme.Hex("#6f8cd8")
-        };
+        private static readonly Color[] InactiveTitleColors = Array.ConvertAll<Color, Color>(ActiveTitleColors, WashOut);
         private static readonly Color ActiveTitleShadow = XpTheme.Hex("#0f1089");
         private static readonly Color InactiveTitleText = XpTheme.Hex("#d8e4f8");
+
+        // The one-pixel outline around the title bar: top and left in the frame's light blue, right in its dark blue.
+        private static readonly Color ActiveOutlineLight = XpTheme.Hex("#0831d9");
+        private static readonly Color ActiveOutlineDark = XpTheme.Hex("#001ea0");
+        private static readonly Color InactiveOutlineLight = WashOut(ActiveOutlineLight);
+        private static readonly Color InactiveOutlineDark = WashOut(ActiveOutlineDark);
 
         // Frame bands from the outer edge inwards: light on the left, dark on the right and bottom.
         private static readonly Color[] ActiveFrameLight =
@@ -46,14 +57,13 @@ namespace OfficeLockChecker
         {
             XpTheme.Hex("#00138c"), XpTheme.Hex("#001ea0"), XpTheme.Hex("#003bda"), XpTheme.Hex("#0855dd")
         };
-        private static readonly Color[] InactiveFrameLight =
-        {
-            XpTheme.Hex("#6582d4"), XpTheme.Hex("#8da9ea"), XpTheme.Hex("#7a96df"), XpTheme.Hex("#7a96df")
-        };
-        private static readonly Color[] InactiveFrameDark =
-        {
-            XpTheme.Hex("#4b64b8"), XpTheme.Hex("#5a73c3"), XpTheme.Hex("#7088d8"), XpTheme.Hex("#7a96df")
-        };
+        private static readonly Color[] InactiveFrameLight = Array.ConvertAll<Color, Color>(ActiveFrameLight, WashOut);
+        private static readonly Color[] InactiveFrameDark = Array.ConvertAll<Color, Color>(ActiveFrameDark, WashOut);
+
+        // Caption buttons from XP.css (MIT), traced pixel for pixel from Windows XP; see assets/Convert-XpCaptionButtons.ps1.
+        private static readonly Dictionary<string, Bitmap> CaptionImages = LoadCaptionImages();
+        // Inactive XP windows show their caption buttons faded.
+        private static readonly ImageAttributes InactiveButtonAttributes = CreateFadeAttributes(0.6F);
 
         private CaptionButton hoveredButton;
         private CaptionButton pressedButton;
@@ -90,6 +100,17 @@ namespace OfficeLockChecker
         private int TitleBarHeight
         {
             get { return FrameWidth + CaptionHeight; }
+        }
+
+        // XP rounds the top-left corner slightly more than the top-right.
+        private static int LeftCornerRadius
+        {
+            get { return XpTheme.Scaled(8); }
+        }
+
+        private static int RightCornerRadius
+        {
+            get { return XpTheme.Scaled(7); }
         }
 
         protected override void OnHandleCreated(EventArgs eventArgs)
@@ -292,13 +313,31 @@ namespace OfficeLockChecker
             Invalidate();
         }
 
-        // Rounded top corners and square bottom corners, as on every XP window.
+        // Rounded top corners cut row by row, the same staircase the title outline follows; the bottom corners stay square.
         private Region CreateWindowRegion()
         {
-            using (GraphicsPath outline = XpTheme.CreateTopRoundedRectangle(new RectangleF(0, 0, Width, Height), XpTheme.Scaled(8)))
+            int leftRadius = LeftCornerRadius;
+            int rightRadius = RightCornerRadius;
+            int cornerRows = Math.Max(leftRadius, rightRadius);
+            Region region = new Region(new Rectangle(0, cornerRows, Width, Height - cornerRows));
+            for (int row = 0; row < cornerRows; row++)
             {
-                return new Region(outline);
+                int leftInset = CornerInset(leftRadius, row);
+                int rightInset = CornerInset(rightRadius, row);
+                region.Union(new Rectangle(leftInset, row, Width - leftInset - rightInset, 1));
             }
+            return region;
+        }
+
+        // Pixels a rounded corner cuts from the start of a row, measured against a circle through the pixel centers.
+        private static int CornerInset(int radius, int row)
+        {
+            if (row < 0 || row >= radius)
+            {
+                return 0;
+            }
+            double distanceFromCenter = radius - row - 0.5;
+            return (int)Math.Round(radius - Math.Sqrt(radius * radius - distanceFromCenter * distanceFromCenter));
         }
 
         private int HitTest(Point point)
@@ -375,10 +414,10 @@ namespace OfficeLockChecker
         // Chrome is laid out in client coordinates: a maximized window is wider than its client area by the off-screen frame.
         private Rectangle GetCaptionButtonBounds(CaptionButton button)
         {
-            int size = XpTheme.Scaled(21);
+            int size = XpTheme.Scaled(CaptionButtonSize);
             int spacing = XpTheme.Scaled(2);
             int right = ClientSize.Width - FrameWidth - XpTheme.Scaled(1);
-            int top = FrameWidth + (CaptionHeight - size) / 2;
+            int top = Math.Max(0, FrameWidth + (CaptionHeight - size) / 2 - XpTheme.Scaled(1));
             int positionFromRight = button == CaptionButton.Close ? 0 : button == CaptionButton.Maximize ? 1 : 2;
             return new Rectangle(right - size - positionFromRight * (size + spacing), top, size, size);
         }
@@ -420,25 +459,32 @@ namespace OfficeLockChecker
 
         private void DrawTitleBar(Graphics graphics)
         {
-            Rectangle titleBounds = new Rectangle(0, 0, ClientSize.Width, TitleBarHeight);
+            int width = ClientSize.Width;
+            Rectangle titleBounds = new Rectangle(0, 0, width, TitleBarHeight);
             Color[] titleColors = isActive ? ActiveTitleColors : InactiveTitleColors;
             using (LinearGradientBrush titleBrush = XpTheme.CreateVerticalBlendBrush(titleBounds, titleColors, TitleStops))
             {
                 graphics.FillRectangle(titleBrush, titleBounds);
             }
+            if (!IsMaximized)
+            {
+                DrawTitleOutline(graphics, width);
+            }
 
-            int captionTop = FrameWidth;
+            // The icon and title share the caption buttons' vertical center, as on XP.
+            Rectangle closeBounds = GetCaptionButtonBounds(CaptionButton.Close);
+            int centerY = closeBounds.Top + closeBounds.Height / 2;
             int iconSize = XpTheme.Scaled(16);
             int iconLeft = FrameWidth + XpTheme.Scaled(3);
             Icon icon = GetCaptionIcon(iconSize);
             if (icon != null)
             {
-                graphics.DrawIcon(icon, new Rectangle(iconLeft, captionTop + (CaptionHeight - iconSize) / 2, iconSize, iconSize));
+                graphics.DrawIcon(icon, new Rectangle(iconLeft, centerY - iconSize / 2, iconSize, iconSize));
             }
 
             int textLeft = iconLeft + iconSize + XpTheme.Scaled(4);
             int textRight = GetCaptionButtonBounds(CaptionButton.Minimize).Left - XpTheme.Scaled(4);
-            Rectangle textBounds = new Rectangle(textLeft, captionTop, Math.Max(0, textRight - textLeft), CaptionHeight);
+            Rectangle textBounds = new Rectangle(textLeft, centerY - CaptionHeight / 2, Math.Max(0, textRight - textLeft), CaptionHeight);
             const TextFormatFlags titleFormat = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
                 | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
             if (isActive)
@@ -474,100 +520,121 @@ namespace OfficeLockChecker
             return captionIcon;
         }
 
-        private void DrawCaptionButton(Graphics graphics, CaptionButton button)
+        // XP outlines the title bar's top and sides and follows the corner staircase, with a half-tone pixel inside each step.
+        private void DrawTitleOutline(Graphics graphics, int width)
         {
-            Rectangle bounds = GetCaptionButtonBounds(button);
-            bool hovered = hoveredButton == button;
-            bool pressed = hovered && pressedButton == button;
-            Color shadeColor;
-            Color glowColor;
-            if (button == CaptionButton.Close)
+            Color lightColor = isActive ? ActiveOutlineLight : InactiveOutlineLight;
+            Color darkColor = isActive ? ActiveOutlineDark : InactiveOutlineDark;
+            int leftRadius = LeftCornerRadius;
+            int rightRadius = RightCornerRadius;
+            using (SolidBrush lightBrush = new SolidBrush(lightColor))
+            using (SolidBrush lightSoftBrush = new SolidBrush(Color.FromArgb(128, lightColor)))
+            using (SolidBrush darkBrush = new SolidBrush(darkColor))
+            using (SolidBrush darkSoftBrush = new SolidBrush(Color.FromArgb(128, darkColor)))
             {
-                shadeColor = XpTheme.Hex(pressed ? "#a83418" : hovered ? "#e1603a" : "#c94a26");
-                glowColor = XpTheme.Hex(pressed ? "#cf6440" : hovered ? "#ffb393" : "#f09272");
-            }
-            else
-            {
-                shadeColor = XpTheme.Hex(pressed ? "#1747c4" : hovered ? "#3a7bff" : "#2361ea");
-                glowColor = XpTheme.Hex(pressed ? "#3b70db" : hovered ? "#9ccaff" : "#6ba6ff");
-            }
-
-            SmoothingMode previousSmoothing = graphics.SmoothingMode;
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            float borderWidth = Math.Max(1F, XpTheme.DpiScale);
-            RectangleF faceBounds = RectangleF.Inflate(bounds, -borderWidth / 2, -borderWidth / 2);
-            using (GraphicsPath face = XpTheme.CreateRoundedRectangle(faceBounds, 3F * XpTheme.DpiScale))
-            using (LinearGradientBrush faceBrush = new LinearGradientBrush(bounds, shadeColor, glowColor, 45F))
-            using (Pen borderPen = new Pen(Color.White, borderWidth))
-            {
-                graphics.FillPath(faceBrush, face);
-                graphics.DrawPath(borderPen, face);
-                DrawCaptionGlyph(graphics, button, bounds, faceBrush);
-                if (!isActive)
+                int topLeftInset = CornerInset(leftRadius, 0);
+                graphics.FillRectangle(lightBrush, topLeftInset, 0, width - topLeftInset - CornerInset(rightRadius, 0), 1);
+                for (int row = 1; row < TitleBarHeight; row++)
                 {
-                    using (SolidBrush washBrush = new SolidBrush(Color.FromArgb(100, Color.White)))
+                    int leftStart = CornerInset(leftRadius, row);
+                    int leftLength = OutlineRunLength(leftRadius, row);
+                    graphics.FillRectangle(lightBrush, leftStart, row, leftLength, 1);
+                    if (CornerInset(leftRadius, row - 1) > 0)
                     {
-                        graphics.FillPath(washBrush, face);
+                        graphics.FillRectangle(lightSoftBrush, leftStart + leftLength, row, 1, 1);
+                    }
+
+                    int rightStart = width - CornerInset(rightRadius, row) - OutlineRunLength(rightRadius, row);
+                    graphics.FillRectangle(darkBrush, rightStart, row, OutlineRunLength(rightRadius, row), 1);
+                    if (CornerInset(rightRadius, row - 1) > 0)
+                    {
+                        graphics.FillRectangle(darkSoftBrush, rightStart - 1, row, 1, 1);
                     }
                 }
             }
-            graphics.SmoothingMode = previousSmoothing;
         }
 
-        // Glyphs are laid out on the 21-pixel grid of the original XP buttons and scaled to the button size.
-        private void DrawCaptionGlyph(Graphics graphics, CaptionButton button, Rectangle bounds, Brush faceBrush)
+        // A row's outline runs from its own corner inset to where the row above began, so the staircase has no gaps.
+        private static int OutlineRunLength(int radius, int row)
         {
-            float unit = bounds.Width / 21F;
-            switch (button)
+            return Math.Max(1, CornerInset(radius, row - 1) - CornerInset(radius, row));
+        }
+
+        private void DrawCaptionButton(Graphics graphics, CaptionButton button)
+        {
+            bool hovered = hoveredButton == button;
+            string state = hovered && pressedButton == button ? "pressed" : hovered ? "hover" : "normal";
+            string glyph = button == CaptionButton.Close ? "close"
+                : button == CaptionButton.Minimize ? "minimize"
+                : IsMaximized ? "restore" : "maximize";
+            Bitmap image = CaptionImages[glyph + "-" + state];
+            Rectangle bounds = GetCaptionButtonBounds(button);
+
+            // The images are pre-scaled to the button size, so nearest neighbour copies them pixel for pixel.
+            InterpolationMode previousInterpolation = graphics.InterpolationMode;
+            PixelOffsetMode previousPixelOffset = graphics.PixelOffsetMode;
+            graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            graphics.PixelOffsetMode = PixelOffsetMode.Half;
+            ImageAttributes attributes = isActive ? null : InactiveButtonAttributes;
+            graphics.DrawImage(image, bounds, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attributes);
+            graphics.InterpolationMode = previousInterpolation;
+            graphics.PixelOffsetMode = previousPixelOffset;
+        }
+
+        private static Dictionary<string, Bitmap> LoadCaptionImages()
+        {
+            Dictionary<string, Bitmap> images = new Dictionary<string, Bitmap>();
+            int size = XpTheme.Scaled(CaptionButtonSize);
+            foreach (string glyph in new[] { "minimize", "maximize", "restore", "close" })
             {
-                case CaptionButton.Minimize:
-                    graphics.FillRectangle(Brushes.White, GridRectangle(bounds, unit, 5, 13, 7, 3));
-                    break;
-                case CaptionButton.Maximize:
-                    if (IsMaximized)
+                foreach (string state in new[] { "normal", "hover", "pressed" })
+                {
+                    string name = glyph + "-" + state;
+                    string resourceName = "OfficeLockChecker.caption." + name + ".png";
+                    using (Stream imageStream = typeof(XpForm).Assembly.GetManifestResourceStream(resourceName))
+                    using (Bitmap original = new Bitmap(imageStream))
                     {
-                        DrawWindowGlyph(graphics, GridRectangle(bounds, unit, 8, 4, 9, 9), unit, 2);
-                        Rectangle frontWindow = GridRectangle(bounds, unit, 4, 8, 9, 9);
-                        graphics.FillRectangle(faceBrush, frontWindow);
-                        DrawWindowGlyph(graphics, frontWindow, unit, 2);
+                        images[name] = ScaleCaptionImage(original, size);
                     }
-                    else
-                    {
-                        DrawWindowGlyph(graphics, GridRectangle(bounds, unit, 5, 5, 11, 11), unit, 3);
-                    }
-                    break;
-                case CaptionButton.Close:
-                    using (Pen crossPen = new Pen(Color.White, 2.4F * unit))
-                    {
-                        crossPen.StartCap = LineCap.Square;
-                        crossPen.EndCap = LineCap.Square;
-                        float near = 6.5F * unit;
-                        float far = 14.5F * unit;
-                        graphics.DrawLine(crossPen, bounds.X + near, bounds.Y + near, bounds.X + far, bounds.Y + far);
-                        graphics.DrawLine(crossPen, bounds.X + far, bounds.Y + near, bounds.X + near, bounds.Y + far);
-                    }
-                    break;
+                }
             }
+            return images;
         }
 
-        // An outlined window with a thick title edge, as in the XP maximize and restore glyphs.
-        private static void DrawWindowGlyph(Graphics graphics, Rectangle bounds, float unit, int titleUnits)
+        // At 100% the XP bitmaps are used as is; other scales resample smoothly instead of doubling every few pixel rows.
+        private static Bitmap ScaleCaptionImage(Bitmap original, int size)
         {
-            int line = Math.Max(1, (int)Math.Round(unit));
-            int titleThickness = Math.Max(line + 1, (int)Math.Round(titleUnits * unit));
-            graphics.FillRectangle(Brushes.White, bounds.X, bounds.Y, bounds.Width, titleThickness);
-            graphics.FillRectangle(Brushes.White, bounds.X, bounds.Y, line, bounds.Height);
-            graphics.FillRectangle(Brushes.White, bounds.Right - line, bounds.Y, line, bounds.Height);
-            graphics.FillRectangle(Brushes.White, bounds.X, bounds.Bottom - line, bounds.Width, line);
+            Bitmap scaled = new Bitmap(size, size, PixelFormat.Format32bppPArgb);
+            using (Graphics graphics = Graphics.FromImage(scaled))
+            using (ImageAttributes attributes = new ImageAttributes())
+            {
+                bool isOriginalSize = size == original.Width;
+                graphics.InterpolationMode = isOriginalSize ? InterpolationMode.NearestNeighbor : InterpolationMode.HighQualityBicubic;
+                graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                attributes.SetWrapMode(WrapMode.TileFlipXY);
+                Rectangle target = new Rectangle(0, 0, size, size);
+                graphics.DrawImage(original, target, 0, 0, original.Width, original.Height, GraphicsUnit.Pixel, attributes);
+            }
+            return scaled;
         }
 
-        private static Rectangle GridRectangle(Rectangle bounds, float unit, float left, float top, float width, float height)
+        private static ImageAttributes CreateFadeAttributes(float opacity)
         {
-            return new Rectangle(
-                bounds.X + (int)Math.Round(left * unit),
-                bounds.Y + (int)Math.Round(top * unit),
-                (int)Math.Round(width * unit),
-                (int)Math.Round(height * unit));
+            ColorMatrix fadeMatrix = new ColorMatrix();
+            fadeMatrix.Matrix33 = opacity;
+            ImageAttributes attributes = new ImageAttributes();
+            attributes.SetColorMatrix(fadeMatrix);
+            return attributes;
+        }
+
+        // Inactive XP windows show the same caption faded toward a pale periwinkle.
+        private static Color WashOut(Color color)
+        {
+            const float fade = 0.75F;
+            return Color.FromArgb(
+                (int)(color.R + (150 - color.R) * fade),
+                (int)(color.G + (170 - color.G) * fade),
+                (int)(color.B + (230 - color.B) * fade));
         }
     }
 }

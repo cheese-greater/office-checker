@@ -19,10 +19,13 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 $outputPath = Join-Path $outputDirectory 'OfficeLockChecker.exe'
 $manifestPath = Join-Path $PSScriptRoot 'src\app.manifest'
 $sourcePaths = Get-ChildItem -Path (Join-Path $PSScriptRoot 'src') -Filter '*.cs' | ForEach-Object { $_.FullName }
+# XP caption button images, regenerated with assets\Convert-XpCaptionButtons.ps1.
+$captionResources = Get-ChildItem -Path (Join-Path $PSScriptRoot 'assets\caption') -Filter '*.png' |
+    ForEach-Object { "/resource:$($_.FullName),OfficeLockChecker.caption.$($_.Name)" }
 
 & $compilerPath /nologo /target:winexe /optimize+ /warnaserror+ `
     "/out:$outputPath" "/win32icon:$iconPath" "/win32manifest:$manifestPath" `
-    "/resource:$iconPath,OfficeLockChecker.app.ico" `
+    "/resource:$iconPath,OfficeLockChecker.app.ico" $captionResources `
     /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
     $sourcePaths
 if ($LASTEXITCODE -ne 0) {
